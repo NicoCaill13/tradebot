@@ -1,10 +1,13 @@
-import yahooFinance from 'yahoo-finance2';
-import type { MarketInfo } from './types.js';
+import YahooFinance from 'yahoo-finance2';
+import type { MarketInfo } from './types.js'; // NOTE: sans .js avec moduleResolution=node
+
+// crée une instance (corrige le 'this' typing)
+const yahoo = new (YahooFinance as any)();
 
 export async function fetchMarket(ticker: string): Promise<MarketInfo> {
   const [q, s] = await Promise.all([
-    yahooFinance.quote(ticker) as Promise<any>,
-    yahooFinance.quoteSummary(ticker, { modules: ['price', 'summaryDetail'] }) as Promise<any>
+    yahoo.quote(ticker),
+    yahoo.quoteSummary(ticker, { modules: ['price', 'summaryDetail'] })
   ]);
 
   const price = (q?.regularMarketPrice ?? null) as number | null;
