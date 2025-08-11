@@ -1,28 +1,35 @@
 {
   "name": "microcap-portfolio-bot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Event-driven US microcap portfolio bot using yahoo-finance2 (ESM / Node >= 18)",
+  "description": "Event-driven US microcap portfolio bot using yahoo-finance2 (TypeScript / Node >= 18)",
   "type": "module",
-  "main": "microcap-portfolio-bot.mjs",
+  "main": "dist/index.js",
   "bin": {
-    "mpb": "./microcap-portfolio-bot.mjs"
+    "mpb": "./dist/index.js"
   },
   "scripts": {
-    "run": "node microcap-portfolio-bot.mjs run",
-    "run:assume-fills": "node microcap-portfolio-bot.mjs run --assume-fills",
-    "clean": "rm -rf data out"
+    "dev": "tsx src/index.ts run",
+    "dev:assume-fills": "tsx src/index.ts run --assume-fills",
+    "build": "tsc -p .",
+    "start": "node dist/index.js run",
+    "clean": "rm -rf data out dist"
   },
   "engines": {
-    "node": ">=18.20.0"
+    "node": ">=20.14.0"
   },
   "dependencies": {
     "yahoo-finance2": "^3.4.0",
     "dayjs": "^1.11.13",
-    "yargs": "^18.0.0",
+    "yargs": "^17.7.2",
     "zod": "^4.0.17",
     "p-limit": "^6.2.0",
     "fs-extra": "^11.3.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "tsx": "^4.16.2",
+    "@types/node": "^20.14.2"
   },
   "keywords": [
     "microcap",
@@ -31,8 +38,8 @@
     "portfolio",
     "event-driven",
     "node",
+    "typescript",
     "esm"
   ],
   "license": "UNLICENSED"
 }
-
