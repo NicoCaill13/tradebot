@@ -1,0 +1,38 @@
+{
+  "name": "microcap-portfolio-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Event-driven US microcap portfolio bot using yahoo-finance2 (ESM / Node >= 18)",
+  "type": "module",
+  "main": "microcap-portfolio-bot.mjs",
+  "bin": {
+    "mpb": "./microcap-portfolio-bot.mjs"
+  },
+  "scripts": {
+    "run": "node microcap-portfolio-bot.mjs run",
+    "run:assume-fills": "node microcap-portfolio-bot.mjs run --assume-fills",
+    "clean": "rm -rf data out"
+  },
+  "engines": {
+    "node": ">=18.20.0"
+  },
+  "dependencies": {
+    "yahoo-finance2": "^3.4.0",
+    "dayjs": "^1.11.13",
+    "yargs": "^18.0.0",
+    "zod": "^4.0.17",
+    "p-limit": "^6.2.0",
+    "fs-extra": "^11.3.1"
+  },
+  "keywords": [
+    "microcap",
+    "trading",
+    "yahoo-finance",
+    "portfolio",
+    "event-driven",
+    "node",
+    "esm"
+  ],
+  "license": "UNLICENSED"
+}
+
