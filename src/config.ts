@@ -45,7 +45,7 @@ export type Config = z.infer<typeof ConfigSchema>;
 export const CONFIG: Config = ConfigSchema.parse({
   paperTrade: true,
   assumeFills: false,
-  capital: 100000,
+  capital: 100,
   maxPortfolioDrawdownPct: 0.2,
   positions: [
     {

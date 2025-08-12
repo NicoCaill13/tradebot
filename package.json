@@ -9,17 +9,23 @@
     "mpb": "./dist/index.js"
   },
   "scripts": {
-    "dev": "tsx src/index.ts run",
-    "dev:assume-fills": "tsx src/index.ts run --assume-fills",
     "build": "tsc -p .",
-    "start": "node dist/index.js run",
-    "clean": "rm -rf data out dist"
+    "start": "node dist/index.js",
+    "run": "node dist/index.js run",
+    "status": "node dist/index.js status",
+    "dev": "tsx src/index.ts",
+    "clean": "rm -rf data out dist",
+    "lint": "eslint . --ext .ts",
+    "lint:fix": "eslint . --ext .ts --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "engines": {
     "node": ">=20.14.0"
   },
   "dependencies": {
     "dayjs": "^1.11.13",
+    "dotenv": "^17.2.1",
     "fs-extra": "^11.3.1",
     "p-limit": "^6.2.0",
     "yahoo-finance2": "^3.4.0",
@@ -28,7 +34,13 @@
   },
   "devDependencies": {
     "@types/node": "^20.14.2",
-    "@types/yargs": "^17.0.33",
+    "@types/yargs": "^17.0.33", 
+    "@typescript-eslint/eslint-plugin": "^8.39.1",
+    "@typescript-eslint/parser": "^8.39.1",
+    "eslint": "^9.33.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.4",
+    "prettier": "^3.6.2",
     "tsx": "^4.16.2",
     "typescript": "^5.5.4"
   },

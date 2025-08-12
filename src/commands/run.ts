@@ -1,15 +1,17 @@
+// src/commands/run.ts
+// Engine command: generates daily orders, updates trailing stops, maintains state
 import pLimit from 'p-limit';
 import dayjs from 'dayjs';
-import { CONFIG } from './config.js';
-import { fetchMarket } from './market.js';
-import { MICROCAP_LIMIT, ADV_PCT_CAP } from './constants.js';
-import { DATA_DIR, OUT_DIR, TODAY } from './env.js';
-import { withinPreEventWindow, fmtUSD, pctStr } from './utils.js';
-import type { PositionCfg } from './config.js';
-import type { MarketInfo, OrderSuggestion, StatePosition } from './types.js';
+import { CONFIG, PositionCfg } from '../config.js';
+import { fetchMarket } from '../market.js';
+import { MICROCAP_LIMIT, ADV_PCT_CAP } from '../constants.js';
+import { OUT_DIR, TODAY } from '../env.js';
+import { withinPreEventWindow, fmtUSD, pctStr } from '../utils.js';
+import type { MarketInfo, OrderSuggestion, StatePosition } from '../types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { loadState, saveState, applyOrderToState } from './state.js';
+import { loadState, saveState, applyOrderToState } from '../state.js';
+import { CAPITAL_DEFAULT, CAPITAL_SYNC_WITH_ENV } from '../settings.js';
 
 function maxSharesByADV(adv3m: number | null): number {
   if (!adv3m || adv3m <= 0) return Number.POSITIVE_INFINITY;
@@ -122,14 +124,27 @@ export function evaluateSymbol(params: {
 }
 
 export async function runEngine(args: { capital?: number; assumeFills?: boolean }) {
-  const capital = args.capital ?? CONFIG.capital;
   const assumeFills = Boolean(args.assumeFills ?? CONFIG.assumeFills);
 
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.mkdir(OUT_DIR, { recursive: true });
-
   let state = await loadState();
-  state.capital = capital;
+
+  let capital: number;
+
+  if (typeof args.capital === 'number') {
+    capital = args.capital;
+  } else if (CAPITAL_SYNC_WITH_ENV) {
+    capital = CAPITAL_DEFAULT;
+  } else if (typeof state.capital === 'number') {
+    capital = state.capital;
+  } else {
+    capital = CAPITAL_DEFAULT;
+  }
+
+  // Persiste si changement
+  if (state.capital !== capital) {
+    state.capital = capital;
+    await saveState(state);
+  }
 
   const limit = pLimit(4);
   const markets = await Promise.all(CONFIG.positions.map(p => limit(() => fetchMarket(p.ticker))));
@@ -139,23 +154,24 @@ export async function runEngine(args: { capital?: number; assumeFills?: boolean 
 
   for (const cfgPos of CONFIG.positions) {
     const mkt = markets.find(m => m.ticker === cfgPos.ticker)!;
-    const st = state.positions[cfgPos.ticker];
+    const current = state.positions[cfgPos.ticker];
 
-    const { orders, warnings, nextState } = evaluateSymbol({ cfgPos, statePos: st, mkt, capital });
+    // Evaluate and persist nextState immediately (spike tightening persistence)
+    let { orders, warnings, nextState } = evaluateSymbol({ cfgPos, statePos: current, mkt, capital });
     warningsAll.push(...warnings);
 
-    // Optionally book fills immediately (paper mode)
+    // Optionally apply fills onto nextState
     if (assumeFills && orders.length) {
       for (const od of orders) {
         const execPx = mkt.price ?? od.priceHint ?? 0;
-        state.positions[cfgPos.ticker] = applyOrderToState(state.positions[cfgPos.ticker], od, execPx);
+        nextState = applyOrderToState(nextState, od, execPx);
       }
     }
 
-    // Always refresh trailing stops
-    state.positions[cfgPos.ticker] = updateTrailingStop(state.positions[cfgPos.ticker], mkt, state.positions[cfgPos.ticker].trailingStopPct);
+    // Persist updated state for this ticker
+    state.positions[cfgPos.ticker] = nextState;
 
-    todays.push({ cfgPos, st: state.positions[cfgPos.ticker], mkt, orders });
+    todays.push({ cfgPos, st: nextState, mkt, orders });
   }
 
   await saveState(state);
@@ -163,6 +179,7 @@ export async function runEngine(args: { capital?: number; assumeFills?: boolean 
   // Write orders file
   const ordersOut = todays.flatMap(t => t.orders.map(o => ({ ...o, ticker: t.cfgPos.ticker })));
   const outPath = path.join(OUT_DIR, `orders-${TODAY}.json`);
+  await fs.mkdir(OUT_DIR, { recursive: true });
   await fs.writeFile(outPath, JSON.stringify({ date: TODAY, assumeFills, orders: ordersOut }, null, 2));
 
   // Console summary
