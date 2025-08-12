@@ -124,21 +124,16 @@ export function evaluateSymbol(params: {
 }
 
 export async function runEngine(args: { capital?: number; assumeFills?: boolean }) {
+  const { capital: capitalArg, assumeFills: assumeFillsFlag = false } = args ?? {};
   const assumeFills = Boolean(args.assumeFills ?? CONFIG.assumeFills);
 
   let state = await loadState();
 
   let capital: number;
 
-  if (typeof args.capital === 'number') {
-    capital = args.capital;
-  } else if (CAPITAL_SYNC_WITH_ENV) {
-    capital = CAPITAL_DEFAULT;
-  } else if (typeof state.capital === 'number') {
-    capital = state.capital;
-  } else {
-    capital = CAPITAL_DEFAULT;
-  }
+  if (typeof capitalArg === 'number') capital = capitalArg;
+else if (CAPITAL_SYNC_WITH_ENV) capital = CAPITAL_DEFAULT;
+else capital = state.capital ?? CAPITAL_DEFAULT;
 
   // Persiste si changement
   if (state.capital !== capital) {

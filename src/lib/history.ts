@@ -1,11 +1,8 @@
 // src/lib/history.ts
 // Unified helper for fetching daily OHLC via yahoo-finance2 chart()
-import YahooFinance from 'yahoo-finance2';
 import dayjs from 'dayjs';
-
+import { yahoo } from '../utils';
 export type DailyBar = { close: number; high: number; low: number };
-
-const yahoo = new (YahooFinance as any)();
 
 
 export async function dailyQuotes(ticker: string, months = 6): Promise<DailyBar[]> {
