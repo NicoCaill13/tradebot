@@ -1,161 +1,90 @@
-import YahooFinance from 'yahoo-finance2';
-import { promises as fs } from 'fs';
-import path from 'path';
-
-import { TODAY } from '../env.js';
-import { ema, atr } from '../indicators.js'
-import type { MarketInfo } from '../types.js';
-import { loadState } from '../state.js';
-import { dailyQuotes } from '../lib/history.js';
-
+import { yahoo } from '../types.js';
+import { intraday } from '../lib/history.js';
+import { ema, atr, vwap, rvol } from '../lib/indicators.js';
 import {
-  SIZING_TARGET_WEIGHT,
-  SIZING_RISK_PCT,
-  STOP_ATR_MULT,
-  ENTRY_PULLBACK_MAX_PCT,
-  FILTER_MIN_PRICE,
-  FILTER_MIN_ADV_3M,
+  TODAY, ENTRY_MKT_THRESHOLD_PCT, OPENING_RANGE_MIN, TP_R_MULT_1, TP_R_MULT_2, STOP_ATR_MULT,
+  CAPITAL_DEFAULT, CAPITAL_SYNC_WITH_ENV, RISK_PER_TRADE_PCT
 } from '../settings.js';
-import { MICROCAP_LIMIT } from '../constants.js';
-import { sizeByPortfolio } from '../lib/sizing.js';
+import { writePlan } from '../lib/io.js';
 
-const fmt = (n: number | null) => (n == null ? '—' : `$${n.toFixed(4)}`);
+type PlanRow = {
+  ticker: string; entry: number; stop: number; tp1: number; tp2: number; shares: number; why: string;
+};
 
-const yahoo = new (YahooFinance as any)();
-
-// Market fetch (quote + cap + ADV)
-async function fetchMarket(ticker: string): Promise<MarketInfo> {
-  const [q, s] = await Promise.all([
-    yahoo.quote(ticker) as Promise<any>,
-    yahoo.quoteSummary(ticker, { modules: ['price', 'summaryDetail', 'calendarEvents'] }) as Promise<any>,
-  ]);
-  const price = (q?.regularMarketPrice ?? null) as number | null;
-  const changePct = (q?.regularMarketChangePercent ?? null) as number | null;
-  const dayHigh = (q?.regularMarketDayHigh ?? null) as number | null;
-  const dayLow = (q?.regularMarketDayLow ?? null) as number | null;
-  const prevClose = (q?.regularMarketPreviousClose ?? null) as number | null;
-  const marketCap = (s?.price?.marketCap ?? q?.marketCap ?? null) as number | null;
-  const adv3m = (s?.summaryDetail?.averageDailyVolume3Month ?? q?.averageDailyVolume3Month ?? null) as number | null;
-  return { ticker, price, changePct, dayHigh, dayLow, prevClose, marketCap, adv3m };
-}
-
-// Main (no user params — the strategy decides)
-export async function runScan() {
-  // Watchlist
-  const full = path.join(process.cwd(), 'watchlist.txt');
-  const raw = await fs.readFile(full, 'utf8').catch(() => '');
-  const tickers = raw.replace(/\r\n?/g, '\n').split('\n').map(s => s.trim().toUpperCase()).filter(s => s && !s.startsWith('#'));
-
-  if (tickers.length === 0) {
-    console.log(`Watchlist vide (${full}). Ajoute des tickers (1 par ligne).`);
-    return;
-  }
-
-  // Capital & cash dispo (capital - MTM)
-  const state = await loadState();
-  const capitalUSD = state.capital;
-  const held = Object.values(state.positions).filter(p => p.shares > 0);
-  let mtm = 0;
-  if (held.length) {
-    const quotes = await Promise.all(held.map(p => yahoo.quote(p.ticker) as Promise<any>));
-    for (let i = 0; i < held.length; i++) {
-      const px = quotes[i]?.regularMarketPrice ?? 0;
-      mtm += (px || 0) * held[i].shares;
-    }
-  }
-  const availableCashUSD = Math.max(0, capitalUSD - mtm);
-
-  type Row = {
-    Ticker: string;
-    Last: string;
-    Entry: string;   // price | shares
-    STOP: string;
-    TP1: string;
-    TP2: string;
-    R: string;       // $ gain to TP1/TP2 and multiples
-    Alloc: string;   // % of capital and limiting constraint
-    Notes: string;
-  };
-  const rows: Row[] = [];
+export async function runScan(tickers: string[]) {
+  const capital = CAPITAL_SYNC_WITH_ENV ? CAPITAL_DEFAULT : CAPITAL_DEFAULT;
+  const rows: PlanRow[] = [];
 
   for (const t of tickers) {
     try {
-      const mkt = await fetchMarket(t);
-      if (!mkt.price || !mkt.marketCap || mkt.marketCap > MICROCAP_LIMIT || (mkt.adv3m ?? 0) < FILTER_MIN_ADV_3M || mkt.price < FILTER_MIN_PRICE) {
-        rows.push({ Ticker: t, Last: fmt(mkt.price ?? null), Entry: '—', STOP: '—', TP1: '—', TP2: '—', R: '—', Alloc: '—', Notes: 'Filtre: cap/liquidité/prix' });
-        continue;
-      }
+      const [q, s]: any = await Promise.all([
+        yahoo.quote(t),
+        yahoo.quoteSummary(t, { modules: ['summaryDetail'] }),
+      ]);
+      const bars = await intraday(t, 2, '1m');
+      const todayBars = bars.filter(b => new Date(b.date).toDateString() === new Date().toDateString());
+      if (todayBars.length < 50) continue;
 
-    const hist = await dailyQuotes(t);
+      const closes = todayBars.map(b=>b.close);
+      const highs  = todayBars.map(b=>b.high);
+      const lows   = todayBars.map(b=>b.low);
+      const vols   = todayBars.map(b=>b.volume);
 
-      if (!hist || hist.length < 50) {
-        rows.push({ Ticker: t, Last: fmt(mkt.price), Entry: '—', STOP: '—', TP1: '—', TP2: '—', R: '—', Alloc: '—', Notes: 'Historique insuffisant' });
-        continue;
-      }
+      const ema9  = ema(closes, 9);
+      const ema20 = ema(closes, 20);
+      const a14   = atr(highs, lows, closes, 14);
+      const vwapArr = vwap(closes, vols);
+      const rvolArr = rvol(vols, 20);
 
-      const closes = hist.map(h => h.close);
-      const highs  = hist.map(h => h.high);
-      const lows   = hist.map(h => h.low);
+      // Opening Range (premières N minutes)
+      const barsPerMin = 1; // on est en 1m
+      const orCount = Math.min(OPENING_RANGE_MIN * barsPerMin, todayBars.length);
+      const orHigh = Math.max(...todayBars.slice(0, orCount).map(b=>b.high));
+      const orLow  = Math.min(...todayBars.slice(0, orCount).map(b=>b.low));
 
-      const ema20 = ema(closes, 20).at(-1)!;
-      const atr14 = atr(highs, lows, closes, 14).at(-1)!;
+      const last = closes.at(-1)!;
+      const lastRVOL = rvolArr.at(-1)!;
+      const lastEMA9 = ema9.at(-1)!;
+      const lastEMA20= ema20.at(-1)!;
+      const lastVWAP = vwapArr.at(-1)!;
+      const lastATR  = a14.at(-1)!;
 
-      // Entry: pullback vers EMA20 (max 2% au-dessus)
-      const rawEntry = mkt.price!;
-      const dipEntry = Math.min(rawEntry, Math.max(ema20, rawEntry * (1 - ENTRY_PULLBACK_MAX_PCT)));
+      // Signal : Breakout OR + structure intraday (EMA9>EMA20, last>VWAP) + RVOL>1.2
+      const breakout = last > orHigh && lastEMA9 > lastEMA20 && last > lastVWAP && lastRVOL >= 1.2;
+      if (!breakout) continue;
 
+      const entry = Math.max(orHigh, last); // rentrer sur dépassement
+      const stop  = Math.min(orLow, entry - STOP_ATR_MULT * lastATR);
+      const R = entry - stop;
+      if (R <= 0) continue;
 
-      // STOP: 2×ATR sous l’entrée
-      const stop = Math.max(0.01, dipEntry - STOP_ATR_MULT * atr14);
+      const tp1 = entry + TP_R_MULT_1 * R;
+      const tp2 = entry + TP_R_MULT_2 * R;
 
-      // TP: 1.5R / 3R
-      const R = dipEntry - stop;
-      const tp1 = dipEntry + 1.5 * R;
-      const tp2 = dipEntry + 3 * R;
+      const risk$ = capital * RISK_PER_TRADE_PCT;
+      const shares = Math.max(0, Math.floor(risk$ / R));
 
-      // Sizing décidé par le portefeuille
-      const sizing = sizeByPortfolio({
-        capitalUSD, 
-        availableCashUSD, 
-        entry: dipEntry, 
-        stop,
-        adv3m: mkt.adv3m ?? null,
-        targetWeight: SIZING_TARGET_WEIGHT,
-        riskPct: SIZING_RISK_PCT,
-      });
-      
-      const allocPct = capitalUSD > 0 ? (sizing.cost / capitalUSD) : 0;
+      const diffPct = Math.abs((last - entry) / entry);
+      const mkt = diffPct <= ENTRY_MKT_THRESHOLD_PCT;
 
-      const notes: string[] = [];
-      const uptrend = closes.at(-1)! > ema20 && ema20 > ema(closes, 50).at(-1)!;
-      notes.push(uptrend ? 'Uptrend ✅' : 'Range/Downtrend');
-      if (sizing.limiting === 'risk') notes.push('Cappé par risque');
-      if (sizing.limiting === 'adv') notes.push('Cappé par ADV');
-      if (sizing.limiting === 'cash') notes.push('Cappé par cash');
-
-      // Optionnel: proximité 52w high
-      const s = await yahoo.quoteSummary(t, { modules: ['summaryDetail'] }) as any;
-      const high52 = s?.summaryDetail?.fiftyTwoWeekHigh ?? null;
-      if (high52 && mkt.price && mkt.price >= 0.9 * high52) notes.push('Near 52w high');
-
-      rows.push({
-        Ticker: t,
-        Last: fmt(mkt.price),
-        Entry: `${fmt(dipEntry)} | ${sizing.shares} sh`,
-        STOP: fmt(stop),
-        TP1: fmt(tp1),
-        TP2: fmt(tp2),
-        R: `${(tp1 - dipEntry).toFixed(2)}/${(tp2 - dipEntry).toFixed(2)} (1.5R/3R)`,
-        Alloc: `${(allocPct * 100).toFixed(1)}% (limite: ${sizing.limiting})`,
-        Notes: notes.join(' · '),
-      });
-    } catch {
-      rows.push({ Ticker: t, Last: '—', Entry: '—', STOP: '—', TP1: '—', TP2: '—', R: '—', Alloc: '—', Notes: 'Erreur fetch' });
-    }
+      const why = `OR breakout, EMA9>EMA20, >VWAP, RVOL=${lastRVOL.toFixed(2)} ${mkt?'MKT':'LMT'}`;
+      rows.push({ ticker: t, entry, stop, tp1, tp2, shares, why });
+    } catch { /* ignore symbol */ }
   }
 
-  console.log(`=== SCAN — ${TODAY} ===`);
-  console.table(rows);
+  // Output plan
+  if (!rows.length) {
+    console.log(`Aucun setup détecté aujourd'hui (${TODAY}).`);
+    return;
+  }
+
+  const lines: string[] = [];
+  lines.push(`DAY PLAN — ${TODAY}`);
+  for (const r of rows) {
+    const ord = `BUY ${r.ticker} ${r.shares} @ ${r.entry.toFixed(4)}  // STOP ${r.stop.toFixed(4)} | TP1 ${r.tp1.toFixed(4)} | TP2 ${r.tp2.toFixed(4)} | ${r.why}`;
+    lines.push(ord);
+  }
+  const outFile = await writePlan(`plan-${TODAY}.txt`, lines.join('\n'));
+  console.log(lines.join('\n'));
+  console.log(`\nPlan enregistré → ${outFile}`);
 }
-
-

@@ -1,23 +1,20 @@
-// src/lib/fx.ts
-import {yahoo} from '../utils.js';
+import { yahoo } from "../types";
 
 const PAIR: Record<string,string> = {
-  EUR: 'EURUSD=X', GBP: 'GBPUSD=X', CHF: 'CHFUSD=X',
+  USD: 'USDUSD=X', EUR: 'EURUSD=X', GBP: 'GBPUSD=X', CHF: 'CHFUSD=X',
   SEK: 'SEKUSD=X', NOK: 'NOKUSD=X', DKK: 'DKKUSD=X'
 };
 const cache = new Map<string, number>();
 
 export async function fxToUSD(ccy: string): Promise<number> {
-  if (!ccy || ccy === 'USD') return 1;
-  if (!PAIR[ccy]) return 1;
-  if (cache.has(ccy)) return cache.get(ccy)!;
-  const q = await yahoo.quote(PAIR[ccy]) as any;
+  const k = ccy?.toUpperCase() || 'USD';
+  if (k === 'USD') return 1;
+  if (cache.has(k)) return cache.get(k)!;
+  const q: any = await yahoo.quote(PAIR[k]).catch(() => null);
   const rate = Number(q?.regularMarketPrice ?? 1) || 1;
-  cache.set(ccy, rate);
+  cache.set(k, rate);
   return rate;
 }
-
-export async function toUSD(amount: number, ccy: string): Promise<number> {
-  const rate = await fxToUSD(ccy);
-  return amount * rate;
+export async function priceToUSD(price: number, ccy: string): Promise<number> {
+  const r = await fxToUSD(ccy); return price * r;
 }

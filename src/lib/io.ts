@@ -1,14 +1,10 @@
-// src/lib/io.ts
-// IO helpers (watchlist, output paths etc.)
 import { promises as fs } from 'fs';
 import path from 'path';
+import { OUT_DIR } from '../settings.js';
 
-export async function loadWatchlist(file = 'watchlist.txt'): Promise<string[]> {
-  const full = path.isAbsolute(file) ? file : path.join(process.cwd(), file);
-  const raw = await fs.readFile(full, 'utf8').catch(() => '');
-  return raw
-    .replace(/\r\n?/g, '\n')
-    .split('\n')
-    .map((s) => s.trim().toUpperCase())
-    .filter((s) => s && !s.startsWith('#'));
+export async function writePlan(filename: string, content: string) {
+  await fs.mkdir(OUT_DIR, { recursive: true });
+  const p = path.join(OUT_DIR, filename);
+  await fs.writeFile(p, content, 'utf8');
+  return p;
 }

@@ -1,77 +1,26 @@
-#!/usr/bin/env -S node --no-warnings
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
+import { runDiscover } from './commands/discover.js';
+import { runScan } from './commands/scan.js';
 
-function main() {
-  return yargs(hideBin(process.argv))
-    .scriptName('mpb')
-    .command(
-      'run',
-      'Run daily decision engine',
-      (y) =>
-        y
-          .option('capital', { type: 'number', describe: 'Override capital (USD)' })
-          .option('assume-fills', { type: 'boolean', default: false }),
-      async (argv) => {
-        const { runEngine } = await import('./commands/run.js');
-        await runEngine({
-          capital: argv.capital as number | undefined,
-          assumeFills: Boolean((argv as any)['assume-fills'] ?? (argv as any).assumeFills),
-        });
-      }
-    )
-    .command(
-      'status',
-      'Show clear STOPs and Take-Profits per ticker and export JSON',
-      () => {},
-      async () => {
-        const { runStatus } = await import('./commands/status.js');
-        await runStatus();
-      }
-    )
-    .command(
-      'targets',
-      'Show take-profit target prices and share quantities per ticker',
-      () => {},
-      async () => {
-        const { runTargets } = await import('./commands/targets.js');
-        await runTargets();
-      }
-    )
-    .command(
-      'scan',
-      'Scan a watchlist and propose Entry / STOP / TPs per ticker with auto-sizing (strategy-decided)',
-      () => {},
-      async () => {
-        const { runScan } = await import('./commands/scan.js');
-        await runScan();
-      }
-    )
-    .command(
-      'discover',
-      'Auto-build a US micro-cap watchlist (writes watchlist.txt)',
-      () => {},
-      async () => {
-        const { runDiscover } = await import('./commands/discover.js');
-        await runDiscover();
-      }
-    )
-    .command(
-      'commit',
-      'Emit human-friendly BUY orders for today based on discover/scan logic',
-      () => {},
-      async () => {
-        const { runCommit } = await import('./commands/commit.js');
-        await runCommit();
-      }
-    )
+async function main() {
+  const argv = await yargs(hideBin(process.argv))
+    .command('discover', 'Construit une watchlist US/EU (1–10$) selon .env', ()=>{}, async () => {
+      const wl = await runDiscover();
+      console.log(`Watchlist (${wl.length}) =>`, wl.join(', '));
+    })
+    .command('scan', 'Scanne la watchlist et génère un plan day-trade', y => y.option('list', {
+      type:'string', describe:'Liste de tickers séparés par des virgules (override discover)'
+    }), async (args) => {
+      const tickers = typeof args.list === 'string' && args.list.trim()
+        ? args.list.split(',').map(s=>s.trim().toUpperCase())
+        : await runDiscover();
+      await runScan(tickers);
+    })
     .demandCommand(1)
-    .help()
     .strict()
-    .parseAsync();
+    .help()
+    .parse();
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch(e=>{ console.error(e); process.exit(1); });

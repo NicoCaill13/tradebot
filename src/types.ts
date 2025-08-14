@@ -1,51 +1,10 @@
-export type Side = 'BUY' | 'SELL';
-export type OrderType = 'LIMIT';
+import YahooFinance from 'yahoo-finance2';
 
-export interface MarketInfo {
-  ticker: string;
-  price: number | null;
-  changePct: number | null;
-  dayHigh: number | null;
-  dayLow: number | null;
-  prevClose: number | null;
-  marketCap: number | null;
-  adv3m: number | null;
-}
+export enum Region { US = 'US', EU = 'EU', ALL = 'ALL' }
 
-export interface OrderSuggestion {
-  time: string;             // ISO
-  side: Side;
-  type: OrderType;          // LIMIT (suggestion)
-  ticker: string;
-  shares: number;           // integer >= 0
-  priceHint: number | null; // near-mkt reference
-  reason: string;
-}
+export type DailyBar = {
+  date: Date;
+  open: number; high: number; low: number; close: number; volume: number;
+};
 
-export interface StatePosition {
-  ticker: string;
-  targetWeight: number;
-  shares: number;
-  avgCost: number;
-  invested: number;
-  highWatermark: number;
-  trailingStopPct: number;
-  trailingStopPrice: number | null;
-  trancheIndexFilled: number;
-  realizedPnL: number;
-  lastAction: (OrderSuggestion & { executedPrice: number }) | null;
-  notes: string;
-}
-
-export interface StateShape {
-  createdAt: string; // YYYY-MM-DD
-  updatedAt: string; // YYYY-MM-DD
-  capital: number;   // USD
-  positions: Record<string, StatePosition>;
-}
-
-export enum Region {
-  US = 'US',
-  EU = 'EU',
-  ALL = 'ALL',
-}
+export const yahoo = new (YahooFinance as any)();

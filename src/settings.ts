@@ -1,64 +1,43 @@
-// src/settings.ts
 import 'dotenv/config';
+import path from 'path';
 import { Region } from './types.js';
 
-function num(name: string, def: number): number {
-  const v = process.env[name];
-  if (v == null || v === '') return def;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : def;
-}
-function pct(name: string, def: number): number {
-  // accepte 0.06 ou "6%" côté .env
-  const v = process.env[name];
-  if (v == null || v === '') return def;
-  const s = v.toString().trim();
-  const n = s.endsWith('%') ? Number(s.slice(0, -1)) / 100 : Number(s);
-  return Number.isFinite(n) ? n : def;
-}
-function str(name: string, def: string): string {
-  const v = process.env[name];
-  return (v == null || v === '') ? def : String(v);
-}
-function regex(name: string, def: RegExp): RegExp {
-  const v = process.env[name];
-  try {
-    return v ? new RegExp(v, 'i') : def;
-  } catch {
-    return def;
-  }
-}
-function bool(name: string, def: boolean): boolean {
-  const v = process.env[name];
-  if (v == null || v === '') return def;
-  return ['1', 'true', 'yes', 'on'].includes(String(v).toLowerCase());
-}
+const num = (k: string, d: number) => {
+  const v = process.env[k]; if (v == null || v === '') return d;
+  const n = Number(v); return Number.isFinite(n) ? n : d;
+};
+const pct = (k: string, d: number) => {
+  const v = process.env[k]; if (v == null || v === '') return d;
+  const s = v.trim(); const n = s.endsWith('%') ? Number(s.slice(0,-1))/100 : Number(s);
+  return Number.isFinite(n) ? n : d;
+};
+const bool = (k: string, d: boolean) => {
+  const v = process.env[k]; if (v == null || v === '') return d;
+  return ['1','true','yes','on'].includes(String(v).toLowerCase());
+};
+const str = (k: string, d: string) => (process.env[k] ?? d);
 
 function parseRegion(v?: string): Region {
-  const s = (v || 'US').toUpperCase();
-  return s === 'EU' ? Region.EU : s === 'ALL' ? Region.ALL : Region.US;
+  const s = (v || 'ALL').toUpperCase();
+  return s === 'US' ? Region.US : s === 'EU' ? Region.EU : Region.ALL;
 }
 
-export const REGION: Region = parseRegion(process.env.REGION);
+export const REGION = parseRegion(process.env.REGION);
+export const MIN_PRICE_USD = num('MIN_PRICE_USD', 1);
+export const MAX_PRICE_USD = num('MAX_PRICE_USD', 10);
+export const MIN_ADV_3M = num('MIN_ADV_3M', 30000);
 
-export const CAPITAL_DEFAULT          = num('CAPITAL_DEFAULT', 100000);
-export const CAPITAL_SYNC_WITH_ENV = bool('CAPITAL_SYNC_WITH_ENV', false);
+export const CAPITAL_DEFAULT = num('CAPITAL_DEFAULT', 100000);
+export const CAPITAL_SYNC_WITH_ENV = bool('CAPITAL_SYNC_WITH_ENV', true);
+export const RISK_PER_TRADE_PCT = pct('RISK_PER_TRADE_PCT', 0.005);
 
-export const FILTER_MARKET_CAP_MAX    = num('FILTER_MARKET_CAP_MAX', 300_000_000);
-export const FILTER_MIN_PRICE         = num('FILTER_MIN_PRICE', 1);
-export const FILTER_MIN_ADV_3M        = num('FILTER_MIN_ADV_3M', 100_000);
-export const FILTER_EXCH_REGEX_US     = regex('FILTER_EXCH_REGEX_US', /(NYSE|Nasdaq|NCM|NMS|NYQ|NGM|AMEX)/i);
-export const FILTER_EXCH_REGEX_EU     = regex('FILTER_EXCH_REGEX_EU', /(PA|AS|BR|LS|MI|MC|DE|L|SW|CO|ST|HE|OL)/i);
+export const OPENING_RANGE_MIN = num('OPENING_RANGE_MIN', 15);
+export const ENTRY_MKT_THRESHOLD_PCT = pct('ENTRY_MKT_THRESHOLD_PCT', 0.003);
+export const TP_R_MULT_1 = num('TP_R_MULT_1', 1.5);
+export const TP_R_MULT_2 = num('TP_R_MULT_2', 3);
+export const STOP_ATR_MULT = num('STOP_ATR_MULT', 2);
 
-export const SIZING_TARGET_WEIGHT     = pct('SIZING_TARGET_WEIGHT', 0.06);
-export const SIZING_RISK_PCT          = pct('SIZING_RISK_PCT', 0.0075);
-export const SIZING_ADV_PCT_CAP       = pct('SIZING_ADV_PCT_CAP', 0.15);
+export const OUT_DIR = path.join(process.cwd(), str('OUT_DIR','out'));
+export const DATA_DIR = path.join(process.cwd(), str('DATA_DIR','data'));
 
-export const ENTRY_PULLBACK_MAX_PCT   = pct('ENTRY_PULLBACK_MAX_PCT', 0.02);
-export const ENTRY_MARKET_THRESHOLD_PCT = pct('ENTRY_MARKET_THRESHOLD_PCT', 0.005);
-export const STOP_ATR_MULT            = num('STOP_ATR_MULT', 2);
-
-export const OUT_DIR_ENV              = str('OUT_DIR', 'out');
-export const DATA_DIR_ENV              = str('OUT_DIR', 'out');
-
-export const FILTER_EXCH_REGEX = REGION === 'EU' ? FILTER_EXCH_REGEX_EU : FILTER_EXCH_REGEX_US;
+export const TODAY = new Date().toJSON();
