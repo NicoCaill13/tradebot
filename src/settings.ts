@@ -1,5 +1,6 @@
 // src/settings.ts
 import 'dotenv/config';
+import { Region } from './types.js';
 
 function num(name: string, def: number): number {
   const v = process.env[name];
@@ -33,13 +34,21 @@ function bool(name: string, def: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(String(v).toLowerCase());
 }
 
+function parseRegion(v?: string): Region {
+  const s = (v || 'US').toUpperCase();
+  return s === 'EU' ? Region.EU : s === 'ALL' ? Region.ALL : Region.US;
+}
+
+export const REGION: Region = parseRegion(process.env.REGION);
+
 export const CAPITAL_DEFAULT          = num('CAPITAL_DEFAULT', 100000);
 export const CAPITAL_SYNC_WITH_ENV = bool('CAPITAL_SYNC_WITH_ENV', false);
 
 export const FILTER_MARKET_CAP_MAX    = num('FILTER_MARKET_CAP_MAX', 300_000_000);
 export const FILTER_MIN_PRICE         = num('FILTER_MIN_PRICE', 1);
 export const FILTER_MIN_ADV_3M        = num('FILTER_MIN_ADV_3M', 100_000);
-export const FILTER_EXCH_REGEX = regex('FILTER_EXCH_REGEX', /(NYSE|Nasdaq|NCM|NMS|NYQ|NGM|AMEX)/i);
+export const FILTER_EXCH_REGEX_US     = regex('FILTER_EXCH_REGEX_US', /(NYSE|Nasdaq|NCM|NMS|NYQ|NGM|AMEX)/i);
+export const FILTER_EXCH_REGEX_EU     = regex('FILTER_EXCH_REGEX_EU', /(PA|AS|BR|LS|MI|MC|DE|L|SW|CO|ST|HE|OL)/i);
 
 export const SIZING_TARGET_WEIGHT     = pct('SIZING_TARGET_WEIGHT', 0.06);
 export const SIZING_RISK_PCT          = pct('SIZING_RISK_PCT', 0.0075);
@@ -51,3 +60,5 @@ export const STOP_ATR_MULT            = num('STOP_ATR_MULT', 2);
 
 export const OUT_DIR_ENV              = str('OUT_DIR', 'out');
 export const DATA_DIR_ENV              = str('OUT_DIR', 'out');
+
+export const FILTER_EXCH_REGEX = REGION === 'EU' ? FILTER_EXCH_REGEX_EU : FILTER_EXCH_REGEX_US;

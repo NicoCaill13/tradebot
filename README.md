@@ -78,7 +78,12 @@ CAPITAL_DEFAULT=100000
 FILTER_MARKET_CAP_MAX=300000000
 FILTER_MIN_PRICE=1
 FILTER_MIN_ADV_3M=100000
-FILTER_EXCH_REGEX=(NYSE|Nasdaq|NCM|NMS|NYQ|NGM|AMEX)
+
+# Portée géographique (US | EU)
+REGION=EU
+FILTER_EXCH_REGEX_US=(NYSE|Nasdaq|NCM|NMS|NYQ|NGM|AMEX)
+FILTER_EXCH_REGEX_EU=(PA|AS|BR|LS|MI|MC|DE|L|SW|CO|ST|HE|OL)
+
 
 # Sizing
 SIZING_TARGET_WEIGHT=0.06        # 6% du capital par idée
@@ -175,7 +180,9 @@ npm start -- discover
   - cap < `FILTER_MARKET_CAP_MAX` (par défaut $300M)
   - prix ≥ `FILTER_MIN_PRICE` (par défaut $1)
   - ADV 3m ≥ `FILTER_MIN_ADV_3M` (par défaut 100k)
-  - place US maj. : `FILTER_EXCH_REGEX`
+  - region : US | EU
+  - place US maj. : `FILTER_EXCH_REGEX_US`
+  - place EU maj. : `FILTER_EXCH_REGEX_EU`
 - **Scoring** (tendance + pullback EMA20) : calcule **EMA20/EMA50** (via `lib/history.ts` + `yahooFinance.chart()`), favorise prix > EMA20 > EMA50 et **proximité EMA20**.
 - **Sorties** : imprime les 10–12 meilleurs, écrit `watchlist.txt` + copie `<OUT_DIR>/watchlist-YYYY-MM-DD.txt`.
 

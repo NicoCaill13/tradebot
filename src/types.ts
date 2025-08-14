@@ -43,3 +43,9 @@ export interface StateShape {
   capital: number;   // USD
   positions: Record<string, StatePosition>;
 }
+
+export enum Region {
+  US = 'US',
+  EU = 'EU',
+  ALL = 'ALL',
+}
