@@ -1,4 +1,4 @@
-import { yahoo } from "../types";
+import { yfQuote } from '../lib/yf.js';
 
 const PAIR: Record<string,string> = {
   USD: 'USDUSD=X', EUR: 'EURUSD=X', GBP: 'GBPUSD=X', CHF: 'CHFUSD=X',
@@ -10,7 +10,7 @@ export async function fxToUSD(ccy: string): Promise<number> {
   const k = ccy?.toUpperCase() || 'USD';
   if (k === 'USD') return 1;
   if (cache.has(k)) return cache.get(k)!;
-  const q: any = await yahoo.quote(PAIR[k]).catch(() => null);
+  const q: any = await yfQuote(PAIR[k])
   const rate = Number(q?.regularMarketPrice ?? 1) || 1;
   cache.set(k, rate);
   return rate;
