@@ -1,289 +1,247 @@
-// src/commands/scan.ts — Overnight planner (marchés fermés)
-// Génére des ordres BUY STOP-LIMIT pour la prochaine séance sur breakout du plus haut d’hier.
-// Stop = entry - k*ATR14 ; TP = 1.5R et 3R ; sizing au risque ; budgets et caps respectés.
+// src/commands/scan.ts — Daily filtered swing plan (micro-caps equity only)
 
-import { yfQuote, yfQuoteSummary } from '../lib/yf.js';
-import { daily } from '../lib/history.js';
-import { ema, atr } from '../lib/indicators.js';
-import { matchRegion } from '../lib/regions.js';
-import { Region } from '../types.js';
+import { daily} from '../lib/history.js';
+import { buildDiscover } from '../lib/discover.js';
+import { writePlan } from '../lib/io.js';
+import { sma } from '../lib/indicators.js';
+import { yfQuoteSummary } from '../lib/yf.js';
+
+import { Bar } from '../types.js';
+import { reviewWithAI } from '../lib/aiReview.js';
+import { ReviewCandidate, PlanRow, TrendUsed } from '../types.js';
+
 import {
-  TODAY,
-  MIN_ADV_3M,
-  TP_R_MULT_1,
-  TP_R_MULT_2,
-  STOP_ATR_MULT,
+  // Core capital/risk/runtime
   CAPITAL_DEFAULT,
   CAPITAL_SYNC_WITH_ENV,
   RISK_PER_TRADE_PCT,
   YF_MAX_CONCURRENCY,
-  OVERNIGHT_BREAK_BUFFER_PCT,
-  ENTRY_STOPLIMIT_BUFFER_PCT,
-  PLAN_MAX_PER_SIDE,
-  MIN_NOTIONAL_USD,
-  MIN_SHARES,
-  ORDER_MAX_NOTIONAL_PCT,
-  DAILY_NOTIONAL_BUDGET_PCT,
-  DAILY_RISK_BUDGET_PCT,
-  MAX_TRADES_PER_DAY,
-  MAX_TRADES_PER_SIDE,
-  INCLUDE_FUNDS,
+
+  // Strategy (entry/stop/tp/sizing)
+  ENTRY_BUFFER_PCT, STOP_BUFFER_PCT, TP1_MULT, TP2_MULT,
+  MIN_SHARES, MIN_NOTIONAL_USD,
+
+  // Filters (price / range / trend / volume / adv)
+  MIN_PRICE_USD, MAX_PRICE_USD,
+  FILTER_MIN_RANGE_PCT, FILTER_MAX_RANGE_PCT,
+  TREND_FILTER, MIN_VOL_LAST, PLAN_MAX_ROWS,
+  MIN_ADV_3M,
+
+  // Swing governance (display only here)
+  TIME_STOP_FRIDAY, INVALIDATE_ON_DAILY_SMA20_BREAK, GAP_REANCHOR_PCT,
+
+  // Micro-cap & security-type constraints
+  MIN_CAP_USD, MAX_CAP_USD,
+  ALLOW_SECURITY_TYPES, EXCLUDE_NAME_PATTERNS,
 } from '../settings.js';
-import { writePlan } from '../lib/io.js';
-import {buildDiscover} from '../lib/discover.js'
 
-type Side = 'EU' | 'US';
-
-type PlanRow = {
-  ticker: string;
-  entry: number;
-  stop: number;
-  tp1: number;
-  tp2: number;
-  shares: number;
-  side: Side;
-  why: string;
-  orderRisk: number;    // $ risqué sur l'ordre (shares * (entry - stop))
-  orderNotional: number; // $ notionnel de l'ordre (shares * entry)
+// ---------- Utils ----------
+const ymd = (d: Date | string) => {
+  const dt = new Date(d);
+  return new Date(dt.getTime() - dt.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 };
+const f4 = (n: number) => n.toFixed(4);
 
-// exécuteur parallèle borné
 async function mapLimit<T, R>(
   arr: T[],
   limit: number,
-  fn: (x: T, i: number) => Promise<R | null>,
+  fn: (x: T, i: number) => Promise<R | null>
 ): Promise<R[]> {
   const out: (R | null)[] = new Array(arr.length);
   let i = 0;
-  const workers = Array.from({ length: Math.min(limit, arr.length) }, async () => {
+  const workers = Array.from({ length: Math.min(limit || 4, arr.length) }, async () => {
     while (true) {
       const idx = i++;
       if (idx >= arr.length) break;
-      try {
-        out[idx] = await fn(arr[idx], idx);
-      } catch {
-        out[idx] = null;
-      }
+      try { out[idx] = await fn(arr[idx], idx); } catch { out[idx] = null; }
     }
   });
   await Promise.all(workers);
   return out.filter((v): v is R => v != null);
 }
 
+function rangePct(high: number, low: number) {
+  const mid = (high + low) / 2;
+  return mid > 0 ? (high - low) / mid : 0;
+}
+
+function renderParamsBlock(capital: number) {
+  const lines = [
+    'PARAMS (résolus) :',
+    `• Strategy : Daily breakout du plus haut d’hier, stop sous le plus bas d’hier, TP = ${TP1_MULT}R / ${TP2_MULT}R`,
+    `• Execution : ENTRY_BUFFER=${(ENTRY_BUFFER_PCT*100).toFixed(2)}% | STOP_BUFFER=${(STOP_BUFFER_PCT*100).toFixed(2)}%`,
+    `• Sizing : capital=${capital} | risk/trade=${(RISK_PER_TRADE_PCT*100).toFixed(2)}% | minNotionalUSD=${MIN_NOTIONAL_USD} | minShares=${MIN_SHARES}`,
+    `• Filtres prix (USD) : min=${MIN_PRICE_USD || '—'} | max=${MAX_PRICE_USD || '—'}`,
+    `• Filtres range : min=${(FILTER_MIN_RANGE_PCT*100).toFixed(2)}% | max=${(FILTER_MAX_RANGE_PCT*100).toFixed(2)}%`,
+    `• Trend daily : ${TREND_FILTER}  (OFF | WEAK[close≥SMA20 OU SMA20↑] | BASIC[close>SMA20 ET SMA20↑])`,
+    `• Liquidité : volLast≥${MIN_VOL_LAST || 0} | ADV3m≥${MIN_ADV_3M || 0}`,
+    `• Micro-cap & type : marketCap in [${MIN_CAP_USD||0}..${MAX_CAP_USD||'∞'}] | allow=[${ALLOW_SECURITY_TYPES.join(',')}] | excludeName=/${EXCLUDE_NAME_PATTERNS.join('|')}/i`,
+    `• Limite sorties : PLAN_MAX_ROWS=${PLAN_MAX_ROWS}`,
+    `• Règles swing : timeStopVendredi=${TIME_STOP_FRIDAY} | invalidationClose<SMA20(daily)=${INVALIDATE_ON_DAILY_SMA20_BREAK} | gapReanchor=${(GAP_REANCHOR_PCT*100).toFixed(2)}%`,
+  ];
+  return lines.join('\n');
+}
+
+// ---------- SCAN principal ----------
 export async function runScan(tickers?: string[]) {
-  let symbols = (tickers || []).map(t => t.trim().toUpperCase()).filter(Boolean);
+  // 0) Univers : CLI > discover()
+  let symbols = (tickers ?? []).map(t => t.trim().toUpperCase()).filter(Boolean);
   if (!symbols.length) {
     symbols = await buildDiscover();
     if (!symbols.length) {
-      console.log('scan: aucun ticker éligible (univers vide). Ajuste les filtres .env.');
+      console.log('scan: univers vide (vérifie REGION et la découverte).');
       return;
     }
   }
 
-  // Capital de référence pour sizing (si tu gères un state de PnL/cash, branche-le ici)
   const capital = CAPITAL_SYNC_WITH_ENV ? CAPITAL_DEFAULT : CAPITAL_DEFAULT;
 
-  const candidates = await mapLimit(
-    symbols,
-    YF_MAX_CONCURRENCY || 4,
-    async (t): Promise<PlanRow | null> => {
+  // Compteurs debug
+  let nAll = 0, nPrice = 0, nRange = 0, nTrend = 0, nVol = 0, nAdv = 0;
+  let nType = 0, nName = 0, nCap = 0;
+
+  const plans = await mapLimit(symbols, YF_MAX_CONCURRENCY || 4, async (t): Promise<PlanRow | null> => {
+    nAll++;
+    try {
+      // 1) Daily bars (dernier jour complet)
+      const dBars: Bar[] = await daily(t, 60);
+      if (!dBars.length) return null;
+
+      const last = dBars[dBars.length - 1];
+      const high = Number(last.high);
+      const low  = Number(last.low);
+      const close = Number(last.close);
+      const volLast = Number(last.volume ?? 0);
+
+      if (!Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close)) return null;
+      if (high <= 0 || low < 0 || high <= low) return null;
+
+      // 2) Métadonnées (type, nom, cap, adv) via quoteSummary
+      let qt = 'UNKNOWN', longName = '', marketCap = 0, adv3m = 0;
       try {
-        // Données de base
-        const [q, s]: any = await Promise.all([
-          yfQuote(t),
-          // On inclut 'quoteType' pour filtrer ETF/FUND/CEF proprement
-          yfQuoteSummary(t, ['price', 'summaryDetail', 'quoteType']),
-        ]);
+        const qs: any = await yfQuoteSummary(t, ['price', 'quoteType', 'summaryDetail']);
+        qt = String(qs?.quoteType?.quoteType ?? '').toUpperCase();
+        longName = String(qs?.price?.longName ?? qs?.price?.shortName ?? '');
+        marketCap = Number(qs?.price?.marketCap ?? qs?.summaryDetail?.marketCap ?? 0);
+        adv3m = Number(qs?.summaryDetail?.averageDailyVolume3Month ?? 0);
+      } catch { /* on tolère l’échec API */ }
 
-        const exchName = (q?.fullExchangeName || q?.exchange || '').toString();
-        const exchCode = (q?.exchange || '').toString();
+      // 2.a) Type autorisé
+      if (ALLOW_SECURITY_TYPES.length && !ALLOW_SECURITY_TYPES.includes(qt)) { nType++; return null; }
 
-        // Side (US / EU) selon la place
-        const side: Side =
-          matchRegion(Region.US, t, exchName, exchCode) ? 'US'
-            : matchRegion(Region.EU, t, exchName, exchCode) ? 'EU'
-            : (null as any);
-        if (!side) return null;
-
-        // Filtre "fonds" si demandé
-        const quoteType = String(q?.quoteType ?? s?.quoteType?.quoteType ?? '');
-        if (!INCLUDE_FUNDS && /ETF|FUND|MUTUAL|CEF|ETN/i.test(quoteType)) return null;
-
-        // Liquidité minimale (ADV 3m)
-        const adv = Number(
-          s?.summaryDetail?.averageDailyVolume3Month ?? q?.averageDailyVolume3Month ?? 0,
-        );
-        if (!adv || adv < MIN_ADV_3M) return null;
-
-        // Barres daily (veille incluse)
-        const bars = await daily(t, 90);
-        if (bars.length < 20) return null;
-
-        const highs = bars.map((b) => b.high);
-        const lows = bars.map((b) => b.low);
-        const closes = bars.map((b) => b.close);
-
-        // ATR14
-        const a14 = atr(highs, lows, closes, 14);
-        const lastATR = a14[a14.length - 1] ?? 0;
-        if (!lastATR) return null;
-
-        // Momentum simple : EMA20 montante et close > EMA20
-        const e20 = ema(closes, 20);
-        const lastE20 = e20[e20.length - 1];
-        const prevE20 = e20[e20.length - 2] ?? lastE20;
-        const lastClose = closes[closes.length - 1];
-        if (!(lastClose > lastE20 && lastE20 >= prevE20)) return null;
-
-        // Plus haut / plus bas d'hier (dernière barre)
-        const nb = bars.length;
-        const yHigh = bars[nb - 1].high;
-        const yLow = bars[nb - 1].low;
-
-        // Entrée = breakout du plus haut d'hier + buffer
-        const entry = yHigh * (1 + OVERNIGHT_BREAK_BUFFER_PCT);
-
-        // Stop = entry - k * ATR
-        const stop = Math.max(0.01, entry - STOP_ATR_MULT * lastATR);
-        const R = entry - stop;
-        if (R <= 0) return null;
-
-        // Targets
-        const tp1 = entry + TP_R_MULT_1 * R;
-        const tp2 = entry + TP_R_MULT_2 * R;
-
-        // --- Sizing au risque ---
-        const risk$ = capital * RISK_PER_TRADE_PCT;
-        let shares = Math.max(0, Math.floor(risk$ / R));
-        if (shares <= 0) return null;
-
-        // Minima (si définis)
-        if (MIN_SHARES > 0) shares = Math.max(shares, MIN_SHARES);
-        if (MIN_NOTIONAL_USD > 0) shares = Math.max(shares, Math.ceil(MIN_NOTIONAL_USD / entry));
-
-        // Cap par ordre : notionnel max = % du capital
-        const maxOrderNotional = capital * ORDER_MAX_NOTIONAL_PCT;
-        if (maxOrderNotional > 0) {
-          const capShares = Math.floor(maxOrderNotional / entry);
-          shares = Math.min(shares, capShares);
-        }
-
-        // Si le cap rend l'ordre trop petit, on skip (mieux que violer la contrainte)
-        if (shares <= 0 || shares * entry < MIN_NOTIONAL_USD || shares < MIN_SHARES) return null;
-
-        const orderRisk = shares * R;
-        const orderNotional = shares * entry;
-
-        const why = `Overnight: breakout > YHigh (${yHigh.toFixed(4)}), EMA20 up, ATR14=${lastATR.toFixed(
-          4,
-        )}`;
-        return { ticker: t, entry, stop, tp1, tp2, shares, side, why, orderRisk, orderNotional };
-      } catch {
-        return null;
+      // 2.b) Exclusions par nom (fonds/ETF/trust/closed-end/etc.)
+      if (EXCLUDE_NAME_PATTERNS.length && longName) {
+        const rx = new RegExp(EXCLUDE_NAME_PATTERNS.join('|'), 'i');
+        if (rx.test(longName)) { nName++; return null; }
       }
-    },
-  );
 
-  if (!candidates.length) {
-    console.log(`Aucun setup détecté aujourd'hui (${TODAY}).`);
-    return;
-  }
+      // 2.c) Filtre market cap (si Yahoo renvoie une valeur)
+      if (MIN_CAP_USD > 0 && marketCap && marketCap < MIN_CAP_USD) { nCap++; return null; }
+      if (MAX_CAP_USD > 0 && marketCap && marketCap > MAX_CAP_USD) { nCap++; return null; }
 
-  // Sélection finale sous contraintes journalières
-  // (budgets cumulés, limites par côté et total)
-  let cumRisk = 0;
-  let cumNotional = 0;
-  let countTotal = 0;
-  let countEU = 0;
-  let countUS = 0;
+      // 3) PRICE filter (USD) — si 0 => pas de filtre
+      if (MIN_PRICE_USD > 0 && close < MIN_PRICE_USD) { nPrice++; return null; }
+      if (MAX_PRICE_USD > 0 && close > MAX_PRICE_USD) { nPrice++; return null; }
 
-  const maxDailyRisk = capital * DAILY_RISK_BUDGET_PCT;
-  const maxDailyNotional = capital * DAILY_NOTIONAL_BUDGET_PCT;
+      // 4) RANGE% filter
+      const rPct = rangePct(high, low);
+      if (rPct < FILTER_MIN_RANGE_PCT || rPct > FILTER_MAX_RANGE_PCT) { nRange++; return null; }
 
-  const pickedEU: PlanRow[] = [];
-  const pickedUS: PlanRow[] = [];
+      // 5) TREND daily simple
+      let trendOK = true as boolean;
+      let trendUsed: TrendUsed = TREND_FILTER as TrendUsed;
+      if (TREND_FILTER !== 'OFF') {
+        const closes = dBars.map(b => Number(b.close));
+        const s20 = sma(closes, 20);
+        const i = closes.length - 1;
+        const S20 = s20[i];
+        const S20p = s20[i - 1];
+        if (TREND_FILTER === 'WEAK') {
+          // close >= SMA20  OU  SMA20 en hausse
+          trendOK = (close >= S20) || (S20 >= S20p);
+        } else { // BASIC
+          // close > SMA20  ET  SMA20 en hausse
+          trendOK = (close > S20) && (S20 >= S20p);
+        }
+      } else {
+        trendUsed = 'OFF';
+      }
+      if (!trendOK) { nTrend++; return null; }
 
-  // (Option : tu peux trier par priorité ici. Ex: notionnel croissant pour plus de diversité)
-  // candidates.sort((a, b) => a.orderNotional - b.orderNotional);
+      // 6) Liquidity (optionnel)
+      if (MIN_VOL_LAST > 0 && volLast < MIN_VOL_LAST) { nVol++; return null; }
+      if (MIN_ADV_3M > 0 && adv3m > 0 && adv3m < MIN_ADV_3M) { nAdv++; return null; }
 
-  for (const r of candidates) {
-    if (countTotal >= MAX_TRADES_PER_DAY) break;
+      // 7) Entrée / Stop / TP
+      const entry = high * (1 + ENTRY_BUFFER_PCT);
+      let stop = Math.max(0.0001, low * (1 - STOP_BUFFER_PCT));
+      if (stop >= entry) {
+        stop = Math.max(0.0001, low * (1 - 3 * STOP_BUFFER_PCT));
+        if (stop >= entry) return null;
+      }
+      const R = entry - stop;
+      const tp1 = entry + TP1_MULT * R;
+      const tp2 = entry + TP2_MULT * R;
 
-    const sideCount = r.side === 'EU' ? countEU : countUS;
-    const maxSide = Math.min(MAX_TRADES_PER_SIDE, PLAN_MAX_PER_SIDE);
-    if (sideCount >= maxSide) continue;
+      // 8) Sizing par risque avec minimas
+      const risk$ = capital * RISK_PER_TRADE_PCT;
+      let shares = Math.floor(risk$ / R);
+      if (MIN_NOTIONAL_USD > 0) {
+        const minByNotional = Math.ceil(MIN_NOTIONAL_USD / entry);
+        shares = Math.max(shares, minByNotional);
+      }
+      shares = Math.max(shares, MIN_SHARES);
+      if (shares <= 0 || !Number.isFinite(shares)) return null;
 
-    const nextRisk = cumRisk + r.orderRisk;
-    const nextNot = cumNotional + r.orderNotional;
-
-    if (maxDailyRisk > 0 && nextRisk > maxDailyRisk) continue;
-    if (maxDailyNotional > 0 && nextNot > maxDailyNotional) continue;
-
-    // ok, on prend
-    if (r.side === 'EU') {
-      pickedEU.push(r);
-      countEU++;
-    } else {
-      pickedUS.push(r);
-      countUS++;
+      return {
+        ticker: t,
+        signalDate: last.date.toISOString(),
+        entry, stop, tp1, tp2, shares,
+        meta: { close, rangePct: rPct, volLast, trendUsed, marketCap }
+      };
+    } catch {
+      return null;
     }
-    countTotal++;
-    cumRisk = nextRisk;
-    cumNotional = nextNot;
-  }
+  });
 
-  // Cap de sécurité par côté (au cas où)
-  const eu = pickedEU.slice(0, PLAN_MAX_PER_SIDE);
-  const us = pickedUS.slice(0, PLAN_MAX_PER_SIDE);
-
-  if (!eu.length && !us.length) {
-    console.log(`Aucun setup détecté aujourd'hui (${TODAY}).`);
+  if (!plans.length) {
+    console.log('Aucun plan retenu après filtres.');
+    console.log(`[debug] total=${nAll} | type=${nType} | name=${nName} | cap=${nCap} | price=${nPrice} | range=${nRange} | trend=${nTrend} | vol=${nVol} | adv=${nAdv}`);
+    console.log('Astuce: desserre FILTER_MIN_RANGE_PCT / FILTER_MAX_RANGE_PCT, mets TREND_FILTER=OFF, baisse MIN_VOL_LAST / MIN_ADV_3M, ou élargis MAX_CAP_USD.');
     return;
   }
 
-  // Format des ordres : BUY STOP-LIMIT (validité: day)
-  function render(rows: PlanRow[], label: string) {
-    if (!rows.length) return '';
-  
-    const lines: string[] = [];
-    lines.push(`DAY PLAN — ${TODAY} [${label}]`);
+  // Tri par "jus" (range%) et limite le nombre de lignes
+  plans.sort((a, b) => b.meta.rangePct - a.meta.rangePct);
+  const rows = plans.slice(0, PLAN_MAX_ROWS > 0 ? PLAN_MAX_ROWS : plans.length);
+
+  // Rendu + sauvegarde
+  const sessYMD = ymd(rows[0].signalDate);
+  const aiEnabled = (process.env.REVIEW_WITH_AI ?? 'false').toLowerCase() === 'true';
+  const header = `PLAN ${sessYMD} — Daily (filtres progressifs, micro-caps equity only${aiEnabled ? ', AI-review' : ''})`;
+  const params = renderParamsBlock(capital);
+  const legend =
+    'LÉGENDE : ENTRY_TRIGGER = cassure du plus haut d’hier (ordre stop) | STOP_LOSS = sous le plus bas d’hier | TP1/TP2 = 1.5R/3R | QTY = quantité (risk-based)';
+  const lines: string[] = [header, params, legend];
+
+  for (const r of rows) {
     lines.push(
-      'LÉGENDE : ENTRY_TRIGGER = prix qui déclenche l’achat (ordre stop) | ' +
-      'ENTRY_LIMIT = borne max du stop-limit | STOP_LOSS = stop de protection | ' +
-      'TP1/TP2 = prises de profit | QTY = quantité'
+      [
+        `BUY STOP ${r.ticker.padEnd(6)}`,
+        `QTY ${String(r.shares).padStart(5)}`,
+        `ENTRY_TRIGGER ${f4(r.entry)}`,
+        `STOP_LOSS ${f4(r.stop)}`,
+        `TP1 ${f4(r.tp1)}`,
+        `TP2 ${f4(r.tp2)}`,
+        `// close ${f4(r.meta.close)} | range ${(r.meta.rangePct*100).toFixed(2)}% | trend ${r.meta.trendUsed}` +
+        (r.meta.marketCap ? ` | cap $${(r.meta.marketCap/1e6).toFixed(0)}M` : '') +
+        (MIN_ADV_3M > 0 ? ` | note: ADV3m filter applied` : '')
+      ].join(' | ')
     );
-  
-    for (const r of rows) {
-      const entryTrigger = r.entry;
-      const entryLimit   = r.entry * (1 + ENTRY_STOPLIMIT_BUFFER_PCT);
-  
-      lines.push(
-        [
-          `BUY STOP-LIMIT ${r.ticker.padEnd(6)}`,
-          `QTY ${String(r.shares).padStart(5)}`,
-          `ENTRY_TRIGGER ${entryTrigger.toFixed(4)}`,
-          `ENTRY_LIMIT ${entryLimit.toFixed(4)}`,
-          `STOP_LOSS ${r.stop.toFixed(4)}`,
-          `TP1 ${r.tp1.toFixed(4)}`,
-          `TP2 ${r.tp2.toFixed(4)}`,
-          `// ${r.why}`
-        ].join(' | ')
-      );
-    }
-  
-    return lines.join('\n');
   }
-  const euText = render(eu, 'EU (prochaine séance)');
-const usText = render(us, 'US (prochaine séance)');
 
-if (euText) {
-  const pTxt = await writePlan(`plan-eu-${TODAY}.txt`, euText);
-  console.log(euText);
-  console.log(`\nPlan EU enregistré → ${pTxt}\n`);
-}
-if (usText) {
-  const pTxt = await writePlan(`plan-us-${TODAY}.txt`, usText);
-  console.log(usText);
-  console.log(`\nPlan US enregistré → ${pTxt}\n`);
-}
+  const txt = lines.join('\n');
+  const path = await writePlan(`plan-${sessYMD}-daily-microcaps.txt`, txt);
+  console.log(txt);
+  console.log(`\nPlan enregistré → ${path}\n`);
 }

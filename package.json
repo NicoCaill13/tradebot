@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "dotenv": "^17.2.1",
+    "openai": "^5.12.2",
     "yahoo-finance2": "^2.13.3",
     "yargs": "^18.0.0"
   },
