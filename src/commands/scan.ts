@@ -1,45 +1,28 @@
-// src/commands/scan.ts — Daily filtered swing plan (micro-caps equity only)
+// src/commands/scan.ts
+// CLEAN SKELETON — collecte univers, snapshots daily, meta ; sortie rapport lisible.
+// Aucune logique d'entrée/sortie ici : on branchera l'algo ensuite.
 
-import { daily} from '../lib/history.js';
+import { daily } from '../lib/history.js';
 import { buildDiscover } from '../lib/discover.js';
 import { writePlan } from '../lib/io.js';
-import { sma } from '../lib/indicators.js';
 import { yfQuoteSummary } from '../lib/yf.js';
+import type { Bar } from '../types.js';
 
-import { Bar } from '../types.js';
-import { reviewWithAI } from '../lib/aiReview.js';
-import { ReviewCandidate, PlanRow, TrendUsed } from '../types.js';
+// -------- ENV (seulement ce qui est utile à ce stade) --------
+const REGION = (process.env.REGION ?? 'ALL').toUpperCase();
+const CAPITAL = Number(process.env.CAPITAL_DEFAULT ?? 100);
 
-import {
-  // Core capital/risk/runtime
-  CAPITAL_DEFAULT,
-  CAPITAL_SYNC_WITH_ENV,
-  RISK_PER_TRADE_PCT,
-  YF_MAX_CONCURRENCY,
+// -------- CONSTANTES (techniques / I/O) --------
+const LOOKBACK_DAYS = 60;              // historique daily minimal
+const YF_MAX_CONCURRENCY = 4;          // parallélisme API
+const REPORT_MAX_ROWS = 200;           // limite d'affichage
 
-  // Strategy (entry/stop/tp/sizing)
-  ENTRY_BUFFER_PCT, STOP_BUFFER_PCT, TP1_MULT, TP2_MULT,
-  MIN_SHARES, MIN_NOTIONAL_USD,
-
-  // Filters (price / range / trend / volume / adv)
-  MIN_PRICE_USD, MAX_PRICE_USD,
-  FILTER_MIN_RANGE_PCT, FILTER_MAX_RANGE_PCT,
-  TREND_FILTER, MIN_VOL_LAST, PLAN_MAX_ROWS,
-  MIN_ADV_3M,
-
-  // Swing governance (display only here)
-  TIME_STOP_FRIDAY, INVALIDATE_ON_DAILY_SMA20_BREAK, GAP_REANCHOR_PCT,
-
-  // Micro-cap & security-type constraints
-  MIN_CAP_USD, MAX_CAP_USD,
-  ALLOW_SECURITY_TYPES, EXCLUDE_NAME_PATTERNS,
-} from '../settings.js';
-
-// ---------- Utils ----------
+// -------- UTILS --------
 const ymd = (d: Date | string) => {
   const dt = new Date(d);
   return new Date(dt.getTime() - dt.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 };
+const f2 = (n: number) => n.toFixed(2);
 const f4 = (n: number) => n.toFixed(4);
 
 async function mapLimit<T, R>(
@@ -49,7 +32,7 @@ async function mapLimit<T, R>(
 ): Promise<R[]> {
   const out: (R | null)[] = new Array(arr.length);
   let i = 0;
-  const workers = Array.from({ length: Math.min(limit || 4, arr.length) }, async () => {
+  const workers = Array.from({ length: Math.min(limit || 1, arr.length) }, async () => {
     while (true) {
       const idx = i++;
       if (idx >= arr.length) break;
@@ -60,188 +43,104 @@ async function mapLimit<T, R>(
   return out.filter((v): v is R => v != null);
 }
 
-function rangePct(high: number, low: number) {
-  const mid = (high + low) / 2;
-  return mid > 0 ? (high - low) / mid : 0;
-}
+// -------- TYPES LOCAUX (propres au scan “clean”) --------
+type Snapshot = {
+  ticker: string;
+  date: string;        // date de la dernière bougie daily (ISO)
+  o: number; h: number; l: number; c: number; v: number;
+  meta: {
+    name?: string;
+    currency?: string;
+    marketCap?: number;      // en unités de la devise du titre (souvent USD)
+    adv3m?: number;          // averageDailyVolume3Month
+    quoteType?: string;
+  };
+};
 
-function renderParamsBlock(capital: number) {
-  const lines = [
-    'PARAMS (résolus) :',
-    `• Strategy : Daily breakout du plus haut d’hier, stop sous le plus bas d’hier, TP = ${TP1_MULT}R / ${TP2_MULT}R`,
-    `• Execution : ENTRY_BUFFER=${(ENTRY_BUFFER_PCT*100).toFixed(2)}% | STOP_BUFFER=${(STOP_BUFFER_PCT*100).toFixed(2)}%`,
-    `• Sizing : capital=${capital} | risk/trade=${(RISK_PER_TRADE_PCT*100).toFixed(2)}% | minNotionalUSD=${MIN_NOTIONAL_USD} | minShares=${MIN_SHARES}`,
-    `• Filtres prix (USD) : min=${MIN_PRICE_USD || '—'} | max=${MAX_PRICE_USD || '—'}`,
-    `• Filtres range : min=${(FILTER_MIN_RANGE_PCT*100).toFixed(2)}% | max=${(FILTER_MAX_RANGE_PCT*100).toFixed(2)}%`,
-    `• Trend daily : ${TREND_FILTER}  (OFF | WEAK[close≥SMA20 OU SMA20↑] | BASIC[close>SMA20 ET SMA20↑])`,
-    `• Liquidité : volLast≥${MIN_VOL_LAST || 0} | ADV3m≥${MIN_ADV_3M || 0}`,
-    `• Micro-cap & type : marketCap in [${MIN_CAP_USD||0}..${MAX_CAP_USD||'∞'}] | allow=[${ALLOW_SECURITY_TYPES.join(',')}] | excludeName=/${EXCLUDE_NAME_PATTERNS.join('|')}/i`,
-    `• Limite sorties : PLAN_MAX_ROWS=${PLAN_MAX_ROWS}`,
-    `• Règles swing : timeStopVendredi=${TIME_STOP_FRIDAY} | invalidationClose<SMA20(daily)=${INVALIDATE_ON_DAILY_SMA20_BREAK} | gapReanchor=${(GAP_REANCHOR_PCT*100).toFixed(2)}%`,
-  ];
-  return lines.join('\n');
-}
-
-// ---------- SCAN principal ----------
+// -------- PIPELINE CLEAN --------
 export async function runScan(tickers?: string[]) {
-  // 0) Univers : CLI > discover()
-  let symbols = (tickers ?? []).map(t => t.trim().toUpperCase()).filter(Boolean);
+  // 1) Univers
+  let symbols = (tickers ?? []).map(s => s.trim().toUpperCase()).filter(Boolean);
   if (!symbols.length) {
     symbols = await buildDiscover();
-    if (!symbols.length) {
-      console.log('scan: univers vide (vérifie REGION et la découverte).');
-      return;
-    }
+  }
+  symbols = Array.from(new Set(symbols)); // dédup
+  if (!symbols.length) {
+    console.log(`SCAN (clean) — univers vide. Vérifie la découverte (REGION=${REGION}).`);
+    return;
   }
 
-  const capital = CAPITAL_SYNC_WITH_ENV ? CAPITAL_DEFAULT : CAPITAL_DEFAULT;
-
-  // Compteurs debug
-  let nAll = 0, nPrice = 0, nRange = 0, nTrend = 0, nVol = 0, nAdv = 0;
-  let nType = 0, nName = 0, nCap = 0;
-
-  const plans = await mapLimit(symbols, YF_MAX_CONCURRENCY || 4, async (t): Promise<PlanRow | null> => {
-    nAll++;
+  // 2) Snapshots (daily + meta) — aucun filtre trading ici
+  const snaps = await mapLimit(symbols, YF_MAX_CONCURRENCY, async (t): Promise<Snapshot | null> => {
     try {
-      // 1) Daily bars (dernier jour complet)
-      const dBars: Bar[] = await daily(t, 60);
-      if (!dBars.length) return null;
+      const bars: Bar[] = await daily(t, LOOKBACK_DAYS);
+      if (!bars?.length) return null;
+      const last = bars[bars.length - 1];
+      const o = Number(last.open), h = Number(last.high), l = Number(last.low), c = Number(last.close);
+      const v = Number(last.volume ?? 0);
+      if (![o,h,l,c].every(Number.isFinite)) return null;
 
-      const last = dBars[dBars.length - 1];
-      const high = Number(last.high);
-      const low  = Number(last.low);
-      const close = Number(last.close);
-      const volLast = Number(last.volume ?? 0);
-
-      if (!Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close)) return null;
-      if (high <= 0 || low < 0 || high <= low) return null;
-
-      // 2) Métadonnées (type, nom, cap, adv) via quoteSummary
-      let qt = 'UNKNOWN', longName = '', marketCap = 0, adv3m = 0;
+      // meta légère via quoteSummary
+      let name = '', currency = 'USD', marketCap = 0, adv3m = 0, quoteType = '';
       try {
-        const qs: any = await yfQuoteSummary(t, ['price', 'quoteType', 'summaryDetail']);
-        qt = String(qs?.quoteType?.quoteType ?? '').toUpperCase();
-        longName = String(qs?.price?.longName ?? qs?.price?.shortName ?? '');
+        const qs: any = await yfQuoteSummary(t, ['price', 'summaryDetail', 'quoteType']);
+        name = String(qs?.price?.longName ?? qs?.price?.shortName ?? '');
+        currency = String(qs?.price?.currency ?? 'USD');
         marketCap = Number(qs?.price?.marketCap ?? qs?.summaryDetail?.marketCap ?? 0);
         adv3m = Number(qs?.summaryDetail?.averageDailyVolume3Month ?? 0);
-      } catch { /* on tolère l’échec API */ }
-
-      // 2.a) Type autorisé
-      if (ALLOW_SECURITY_TYPES.length && !ALLOW_SECURITY_TYPES.includes(qt)) { nType++; return null; }
-
-      // 2.b) Exclusions par nom (fonds/ETF/trust/closed-end/etc.)
-      if (EXCLUDE_NAME_PATTERNS.length && longName) {
-        const rx = new RegExp(EXCLUDE_NAME_PATTERNS.join('|'), 'i');
-        if (rx.test(longName)) { nName++; return null; }
-      }
-
-      // 2.c) Filtre market cap (si Yahoo renvoie une valeur)
-      if (MIN_CAP_USD > 0 && marketCap && marketCap < MIN_CAP_USD) { nCap++; return null; }
-      if (MAX_CAP_USD > 0 && marketCap && marketCap > MAX_CAP_USD) { nCap++; return null; }
-
-      // 3) PRICE filter (USD) — si 0 => pas de filtre
-      if (MIN_PRICE_USD > 0 && close < MIN_PRICE_USD) { nPrice++; return null; }
-      if (MAX_PRICE_USD > 0 && close > MAX_PRICE_USD) { nPrice++; return null; }
-
-      // 4) RANGE% filter
-      const rPct = rangePct(high, low);
-      if (rPct < FILTER_MIN_RANGE_PCT || rPct > FILTER_MAX_RANGE_PCT) { nRange++; return null; }
-
-      // 5) TREND daily simple
-      let trendOK = true as boolean;
-      let trendUsed: TrendUsed = TREND_FILTER as TrendUsed;
-      if (TREND_FILTER !== 'OFF') {
-        const closes = dBars.map(b => Number(b.close));
-        const s20 = sma(closes, 20);
-        const i = closes.length - 1;
-        const S20 = s20[i];
-        const S20p = s20[i - 1];
-        if (TREND_FILTER === 'WEAK') {
-          // close >= SMA20  OU  SMA20 en hausse
-          trendOK = (close >= S20) || (S20 >= S20p);
-        } else { // BASIC
-          // close > SMA20  ET  SMA20 en hausse
-          trendOK = (close > S20) && (S20 >= S20p);
-        }
-      } else {
-        trendUsed = 'OFF';
-      }
-      if (!trendOK) { nTrend++; return null; }
-
-      // 6) Liquidity (optionnel)
-      if (MIN_VOL_LAST > 0 && volLast < MIN_VOL_LAST) { nVol++; return null; }
-      if (MIN_ADV_3M > 0 && adv3m > 0 && adv3m < MIN_ADV_3M) { nAdv++; return null; }
-
-      // 7) Entrée / Stop / TP
-      const entry = high * (1 + ENTRY_BUFFER_PCT);
-      let stop = Math.max(0.0001, low * (1 - STOP_BUFFER_PCT));
-      if (stop >= entry) {
-        stop = Math.max(0.0001, low * (1 - 3 * STOP_BUFFER_PCT));
-        if (stop >= entry) return null;
-      }
-      const R = entry - stop;
-      const tp1 = entry + TP1_MULT * R;
-      const tp2 = entry + TP2_MULT * R;
-
-      // 8) Sizing par risque avec minimas
-      const risk$ = capital * RISK_PER_TRADE_PCT;
-      let shares = Math.floor(risk$ / R);
-      if (MIN_NOTIONAL_USD > 0) {
-        const minByNotional = Math.ceil(MIN_NOTIONAL_USD / entry);
-        shares = Math.max(shares, minByNotional);
-      }
-      shares = Math.max(shares, MIN_SHARES);
-      if (shares <= 0 || !Number.isFinite(shares)) return null;
+        quoteType = String(qs?.quoteType?.quoteType ?? '');
+      } catch { /* soft*/ }
 
       return {
         ticker: t,
-        signalDate: last.date.toISOString(),
-        entry, stop, tp1, tp2, shares,
-        meta: { close, rangePct: rPct, volLast, trendUsed, marketCap }
+        date: (last.date instanceof Date ? last.date.toISOString() : String(last.date)),
+        o, h, l, c, v,
+        meta: { name, currency, marketCap, adv3m, quoteType }
       };
     } catch {
       return null;
     }
   });
 
-  if (!plans.length) {
-    console.log('Aucun plan retenu après filtres.');
-    console.log(`[debug] total=${nAll} | type=${nType} | name=${nName} | cap=${nCap} | price=${nPrice} | range=${nRange} | trend=${nTrend} | vol=${nVol} | adv=${nAdv}`);
-    console.log('Astuce: desserre FILTER_MIN_RANGE_PCT / FILTER_MAX_RANGE_PCT, mets TREND_FILTER=OFF, baisse MIN_VOL_LAST / MIN_ADV_3M, ou élargis MAX_CAP_USD.');
+  if (!snaps.length) {
+    console.log(`SCAN (clean) — aucun snapshot récupéré sur ${symbols.length} tickers.`);
     return;
   }
 
-  // Tri par "jus" (range%) et limite le nombre de lignes
-  plans.sort((a, b) => b.meta.rangePct - a.meta.rangePct);
-  const rows = plans.slice(0, PLAN_MAX_ROWS > 0 ? PLAN_MAX_ROWS : plans.length);
+  // 3) Rapport (aucun tri “alpha” imposé : on trie alphabétique pour lecture)
+  const byTicker = [...snaps].sort((a, b) => a.ticker.localeCompare(b.ticker)).slice(0, REPORT_MAX_ROWS);
+  const sessionYMD = ymd(byTicker[0].date);
+  const header =
+    `SCAN ${sessionYMD} — Clean snapshot (univers=${symbols.length}, échantillon=${byTicker.length})\n` +
+    `Capital: ${CAPITAL}\n` +
+    `NOTE: aucune logique d'entrée/stop/TP ici. On branchera l'algorithme de décision sur ces snapshots.`;
 
-  // Rendu + sauvegarde
-  const sessYMD = ymd(rows[0].signalDate);
-  const aiEnabled = (process.env.REVIEW_WITH_AI ?? 'false').toLowerCase() === 'true';
-  const header = `PLAN ${sessYMD} — Daily (filtres progressifs, micro-caps equity only${aiEnabled ? ', AI-review' : ''})`;
-  const params = renderParamsBlock(capital);
-  const legend =
-    'LÉGENDE : ENTRY_TRIGGER = cassure du plus haut d’hier (ordre stop) | STOP_LOSS = sous le plus bas d’hier | TP1/TP2 = 1.5R/3R | QTY = quantité (risk-based)';
-  const lines: string[] = [header, params, legend];
+  const legend = 'COLONNES : TICKER | DATE | O/H/L/C | VOL | CAP(M$) | ADV3m | CUR | TYPE | NOM';
+  const lines: string[] = [header, legend];
 
-  for (const r of rows) {
+  for (const s of byTicker) {
+    const capM = s.meta.marketCap ? (s.meta.marketCap / 1e6) : 0;
     lines.push(
       [
-        `BUY STOP ${r.ticker.padEnd(6)}`,
-        `QTY ${String(r.shares).padStart(5)}`,
-        `ENTRY_TRIGGER ${f4(r.entry)}`,
-        `STOP_LOSS ${f4(r.stop)}`,
-        `TP1 ${f4(r.tp1)}`,
-        `TP2 ${f4(r.tp2)}`,
-        `// close ${f4(r.meta.close)} | range ${(r.meta.rangePct*100).toFixed(2)}% | trend ${r.meta.trendUsed}` +
-        (r.meta.marketCap ? ` | cap $${(r.meta.marketCap/1e6).toFixed(0)}M` : '') +
-        (MIN_ADV_3M > 0 ? ` | note: ADV3m filter applied` : '')
+        s.ticker.padEnd(6),
+        s.date.slice(0,10),
+        `O ${f4(s.o)}`,
+        `H ${f4(s.h)}`,
+        `L ${f4(s.l)}`,
+        `C ${f4(s.c)}`,
+        `V ${s.v.toLocaleString()}`,
+        `CAP ${capM ? f2(capM) + 'M' : '-'}`,
+        `ADV3m ${s.meta.adv3m ? s.meta.adv3m.toLocaleString() : '-'}`,
+        s.meta.currency ?? 'USD',
+        s.meta.quoteType ?? '',
+        (s.meta.name ?? '').slice(0, 40)
       ].join(' | ')
     );
   }
 
   const txt = lines.join('\n');
-  const path = await writePlan(`plan-${sessYMD}-daily-microcaps.txt`, txt);
+  const path = await writePlan(`scan-${sessionYMD}-clean.txt`, txt);
+
   console.log(txt);
-  console.log(`\nPlan enregistré → ${path}\n`);
+  console.log(`\nRapport enregistré → ${path}\n`);
 }

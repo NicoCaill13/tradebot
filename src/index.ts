@@ -1,31 +1,46 @@
 // src/index.ts
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { runScan } from './commands/scan.js';
-import { initYahooQuietly } from './lib/yf.js';
+import { runPlan } from './commands/plan.js';
+import { runPlanTicker } from './commands/plan-ticker.js';
+import { runPlanTop } from './commands/plan-top.js';
+import type { Argv } from 'yargs';
+
 
 type ScanArgs = { list?: string };
 
 async function main() {
-  await initYahooQuietly();
 
   const cli = (yargs as any)(hideBin(process.argv));
   await cli
-    .command(
-      'scan',
-      'Construit l’univers (si nécessaire) et génère le plan overnight US/EU',
-      (y: any) => y.option('list', {
+  .scriptName('daytrade-bot')
+  .command(
+    'plan-ticker <ticker>',
+    'Plan PRTA-like pour un ticker (capital & risque depuis .env)',
+    (y: Argv) =>
+      y.positional('ticker', {
         type: 'string',
-        describe: 'Tickers séparés par des virgules (ex: "JBLU,GPRO") pour override'
+        demandOption: true,
+        describe: 'Symbole (ex: PRTA)',
       }),
-      async (args: ScanArgs) => {
-        const tickers =
-          typeof args.list === 'string' && args.list.trim()
-            ? args.list.split(',').map((s: string) => s.trim().toUpperCase())
-            : undefined; 
-        await runScan(tickers);
+    async (args:any) => {
+      await runPlanTicker(String(args.ticker));
+    }
+  )
+    .command(
+      'plan',
+      'Génère un plan daily immuable',
+      (y: ScanArgs) => y,
+      async (_argv: unknown) => {
+        await runPlan();
       }
     )
+    .command('plan-top', 'Génère les ordres détaillés pour le TOP (ou ALL via env)',
+    (y: ScanArgs) => y,
+      async (_argv: unknown) => {
+        await runPlanTop();
+      })
+
     .demandCommand(1)
     .strict()
     .help()
@@ -33,3 +48,4 @@ async function main() {
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
+

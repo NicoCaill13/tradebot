@@ -57,9 +57,11 @@ export type ReviewDecision = {
   adjust?: Partial<{ entry: number; stop: number; tp1: number; tp2: number; shares: number }>;
 };
 
+export type TrendUsed = 'BASIC';
 export type PlanRow = {
   ticker: string;
-  signalDate: string; // ISO (last daily bar)
+  setup: 'Pullback EMA7' | 'Breakout High';
+  signalDate: string; // ISO de la barre daily de référence
   entry: number;
   stop: number;
   tp1: number;
@@ -69,9 +71,9 @@ export type PlanRow = {
     close: number;
     rangePct: number;
     volLast: number;
-    trendUsed: 'OFF' | 'WEAK' | 'BASIC';
+    trendUsed: TrendUsed;
     marketCap?: number;
+    notional: number;
+    risk$: number;
   };
 };
-
-export type TrendUsed = 'OFF' | 'WEAK' | 'BASIC';

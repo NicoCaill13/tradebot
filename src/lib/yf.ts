@@ -1,74 +1,74 @@
 // src/lib/yf.ts
 import yahooFinance from 'yahoo-finance2';
-import { YF_TIMEOUT_MS, YF_COOKIES } from '../settings.js';
 
-// ---- withTimeout : coupe court si Yahoo met trop longtemps ----
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const id = setTimeout(() => reject(new Error(`Timeout ${ms}ms on ${label}`)), ms);
-    p.then(v => { clearTimeout(id); resolve(v); }, e => { clearTimeout(id); reject(e); });
+const TIMEOUT = Number(process.env.YF_TIMEOUT_MS ?? 8000);
+
+// -------- Types
+export type ChartOpts = {
+  interval: '1d' | '60m' | '30m' | '15m' | '5m' | '1m';
+  range?: string;                   // '20d' | '60d' | '1y' ...
+  period1?: Date | number | string; // si pas de range, fournir p1/p2
+  period2?: Date | number | string;
+  includePrePost?: boolean;
+};
+export type QuoteSummaryModule =
+  | 'price' | 'summaryDetail' | 'assetProfile' | 'quoteType'
+  | 'financialData' | 'calendarEvents' | 'earnings' | 'earningsTrend'
+  | 'balanceSheetHistory' | 'balanceSheetHistoryQuarterly'
+  | 'cashflowStatementHistory' | 'cashflowStatementHistoryQuarterly'
+  | 'incomeStatementHistory' | 'incomeStatementHistoryQuarterly'
+  | 'recommendationTrend' | 'upgradeDowngradeHistory';
+
+
+// -------- Wrappers sûrs
+export async function yfChart(symbol: string, opts: ChartOpts) {
+  const o: any = {
+    interval: opts.interval,
+    includePrePost: !!opts.includePrePost,
+  };
+  if (opts.range) {
+    o.range = opts.range; // évite l’erreur /period1
+  } else {
+    o.period1 = opts.period1 ?? new Date(Date.now() - 90 * 864e5);
+    o.period2 = opts.period2 ?? new Date();
+  }
+  for (const k of Object.keys(o)) if (o[k] == null) delete o[k];
+
+  if (String(process.env.DEBUG_PLAN || '') === '1') {
+    console.warn('[yfChart]', symbol, JSON.stringify(o, (k,v)=> {
+      if (v instanceof Date) return v.toISOString();
+      return v;
+    }));
+  }
+  return yahooFinance.chart(symbol, o, {
+    validateResult: false,
+    fetchOptions: { timeout: TIMEOUT },
   });
 }
-const MODULE_OPTS = { validateResult: false } as const;
 
-let _inited = false;
-
-export async function initYahooQuietly() {
-  if (_inited) return;
-  _inited = true;
-
-  // Supprime la notice "yahooSurvey" si dispo dans ta version
-  try {
-    (yahooFinance as any).suppressNotices?.(['yahooSurvey']);
-  } catch {}
-
-  // Warm-up (récupère crumb/cookies) en silencieux
-  const origLog = console.log;
-  const origWarn = console.warn;
-  const origInfo = console.info;
-  try {
-    console.log = () => {};
-    console.warn = () => {};
-    console.info = () => {};
-    await yfQuote('AAPL').catch(() => null);
-  } finally {
-    console.log = origLog;
-    console.warn = origWarn;
-    console.info = origInfo;
-  }
-}
-
-// ---- queryOptions overrides : on peut injecter des headers/cookies ----
-function qOpts(extra?: any) {
-  const headers: Record<string, string> = {};
-  if (YF_COOKIES) headers['Cookie'] = YF_COOKIES;
-  return { ...(extra || {}), headers };
-}
-
-// ---- Wrappers sûrs (on passe par any pour éviter les unions de littéraux) ----
 export async function yfQuote(symbol: string) {
-  const p = (yahooFinance as any).quote(symbol, qOpts(), MODULE_OPTS) as Promise<any>;
-  return withTimeout(p, YF_TIMEOUT_MS, `quote(${symbol})`);
+  return yahooFinance.quote(symbol, {}, {
+    validateResult: false,
+    fetchOptions: { timeout: TIMEOUT },
+  });
 }
 
-export async function yfQuoteSummary(symbol: string, modules: readonly string[] | 'all') {
-  const p = (yahooFinance as any).quoteSummary(
-    symbol,
-    { modules: modules as any, ...qOpts() },
-    MODULE_OPTS
-  ) as Promise<any>;
-  return withTimeout(p, YF_TIMEOUT_MS, `quoteSummary(${symbol})`);
+export async function yfQuoteSummary(symbol: string, modules: readonly QuoteSummaryModule[] | readonly string[]) {
+  return yahooFinance.quoteSummary(symbol, { modules: modules as any }, {
+    validateResult: false,
+    fetchOptions: { timeout: TIMEOUT },
+  });
 }
 
-export async function yfChart(symbol: string, opts: any) {
-  const p = (yahooFinance as any).chart(symbol, { ...opts, ...qOpts() }, MODULE_OPTS) as Promise<any>;
-  return withTimeout(p, YF_TIMEOUT_MS, `chart(${symbol})`);
+export async function yfScreener(args: { scrIds: string; count?: number; region?: string; lang?: string; }) {
+  const { scrIds, count = 100, region, lang } = args;
+  const q: any = { scrIds: scrIds as any, count };
+  if (region) q.region = region;
+  if (lang)   q.lang   = lang;
+  return yahooFinance.screener(q, {
+    validateResult: false,
+    fetchOptions: { timeout: TIMEOUT },
+  });
 }
 
-export async function yfScreener(scrId: string, count = 200) {
-  const p = (yahooFinance as any).screener(
-    { scrIds: scrId, count, ...qOpts() },
-    MODULE_OPTS
-  ) as Promise<any>;
-  return withTimeout(p, YF_TIMEOUT_MS, `screener(${scrId})`);
-}
+yahooFinance.suppressNotices?.(['yahooSurvey', 'ripHistorical']);

@@ -57,3 +57,29 @@ export function rvol(vols: number[], n: number): number[] {
   }
   return out;
 }
+
+// --- RSI (Wilder) ---
+export function rsi(closes: number[], period = 14): number[] {
+  const n = closes.length;
+  const out = new Array<number>(n).fill(NaN);
+  if (n < period + 1) return out;
+
+  let gain = 0, loss = 0;
+  for (let i = 1; i <= period; i++) {
+    const ch = closes[i] - closes[i - 1];
+    if (ch >= 0) gain += ch; else loss -= ch;
+  }
+  let avgGain = gain / period;
+  let avgLoss = loss / period;
+  out[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + (avgGain / avgLoss));
+
+  for (let i = period + 1; i < n; i++) {
+    const ch = closes[i] - closes[i - 1];
+    const g = ch > 0 ? ch : 0;
+    const l = ch < 0 ? -ch : 0;
+    avgGain = (avgGain * (period - 1) + g) / period;
+    avgLoss = (avgLoss * (period - 1) + l) / period;
+    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + (avgGain / avgLoss));
+  }
+  return out;
+}
